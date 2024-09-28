@@ -1,0 +1,87 @@
+library(dplyr)
+
+importDadiResults <- function(filenames, param.list = NULL, n.list = NULL, verbose = FALSE) {
+  process_file <- function(filename, param.list, max_params) {
+    if (file.size(filename) == 0) return(NULL)
+    fl <- read.csv(filename, sep = "\n", header = FALSE, quote = "", fileEncoding = "UTF-8")
+    fl <- clean_all_rows(removeEmptyDadiRows(data.frame(fl), filename))
+    results <- lapply(seq_len(nrow(fl)), function(i) {
+      model_info <- identify_model(fl[i, ], param.list)
+      if (is.null(model_info)) return(NULL)
+      cleaned_row <- clean_row(fl[i, ])
+      rw <- convert_row_to_dataframe(cleaned_row)
+      if (!any(is.na(rw)) && !"NA" %in% rw) {
+        return(extract_row_data(rw, model_info, max_params))
+      }
+      return(NULL)
+    })
+    bind_rows(results)
+  }
+  clean_all_rows <- function(fl) {
+    invalid_rows <- which(!grepl("[a-zA-Z]", substr(fl[, 1], 1, 10)))
+    if (length(invalid_rows) > 0) {
+      for (i in rev(invalid_rows)) {
+        if (i > 1) {
+          fl[i - 1, 1] <- paste(fl[i - 1, 1], fl[i, 1])
+          fl <- fl[-i, , drop = FALSE]
+          if (verbose) print(noquote(paste("Fixed row", i, "by merging with row", i - 1)))
+        }
+      }
+    }
+    fl
+  }
+  identify_model <- function(row, param.list) {
+    matched_name <- names(param.list)[sapply(names(param.list), function(model_name) grepl(model_name, row))]
+    if (length(matched_name) > 0) {
+      model_name <- matched_name[1]
+      return(list(params = param.list[[model_name]], nparams = length(param.list[[model_name]]), model_name = model_name))
+    }
+    if (verbose) print(noquote("No model matched for the row"))
+    return(NULL)
+  }
+  clean_row <- function(row) {
+    row <- gsub("\\[|\\]", " ", row)
+    row <- gsub('\\"', "", row)
+    row <- gsub(" +", ",", row)
+    row <- gsub("\\.\\.|,,", "", row)
+    row
+  }
+  convert_row_to_dataframe <- function(row) {
+    splt <- strsplit(row, split = ",")
+    if (length(splt[[1]]) == 0) {
+      return(NULL)
+    }
+    as.data.frame(t(splt[[1]]), stringsAsFactors = FALSE)
+  }
+  extract_row_data <- function(rw, model_info, max_params) {
+    param_diff <- max_params - model_info$nparams
+    star <- rw[, 1:2, drop = FALSE]
+    posterior <- cbind(rw[, 3:(2 + model_info$nparams)], matrix(NA, nrow = 1, ncol = param_diff))
+    theta <- as.numeric(rw[1, (3 + model_info$nparams)])
+    loglikelihood <- as.numeric(rw[1, (4 + model_info$nparams)])
+    prior <- cbind(rw[1, (5 + model_info$nparams):(4 + (model_info$nparams * 2))], matrix(NA, nrow = 1, ncol = param_diff))
+    upper <- cbind(rw[1, (5 + (model_info$nparams * 2)):(4 + (model_info$nparams * 3))], matrix(NA, nrow = 1, ncol = param_diff))
+    lower <- cbind(rw[1, (5 + (model_info$nparams * 3)):(4 + (model_info$nparams * 4))], matrix(NA, nrow = 1, ncol = param_diff))
+    pts <- rw[1, (5 + (model_info$nparams * 4)):(7 + (model_info$nparams * 4))]
+    flnm <- rw[1, (9 + (model_info$nparams * 4))]
+    data.frame(start = star, posterior = posterior, loglikelihood = loglikelihood, theta = theta, prior = prior, upper = upper, lower = lower, pts = pts, flnms = flnm, stringsAsFactors = FALSE)
+  }
+  print(noquote(paste(length(filenames), "files found.")))
+  max_params <- max(unlist(lapply(param.list, length)))
+  results_list <- lapply(filenames, function(filename) process_file(filename, param.list, max_params))
+  results_list <- Filter(Negate(is.null), results_list)
+  if (length(results_list) == 0) {
+    stop("No valid results found in any of the files.")
+  }
+  final_results <- bind_rows(results_list)
+  final_results <- final_results %>%
+    mutate(
+      AIC = -2 * loglikelihood + 2 * max_params,
+      AICc = ifelse(!is.na(n.list[[as.character(start[[1]])]]), AIC + (((2 * max_params)^2 + 2 * max_params) / (n.list[[as.character(start[[1]])]] - max_params - 1)), NA)
+    )
+  df <- final_results %>%
+    mutate(across(where(is.character), ~ as.numeric(.)))
+  rownames(df) <- seq_len(nrow(df))
+  print(noquote(paste("*** Imported", nrow(df), "runs across", length(filenames), "files ***")))
+  return(df)
+}
